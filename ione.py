@@ -3,43 +3,36 @@ import random
 
 import torch
 
-from utils.metrics import hits_ks_scores, mrr_score
+from utils.data import load_dataset
+from utils.metrics import *
+from args import make_args
 
 
 class IONE:
-    def __init__(self, foldtrain):
-        self.foldtrain = foldtrain
+    def __init__(self, data):
+        self.data = data
 
-    def get_network_anchors(self, postfix_1: str, postfix_2: str):
-        answer_map = dict()
-        file_name = f'AcrossNetworkEmbeddingData/twitter_foursquare_groundtruth/groundtruth.{self.foldtrain}.foldtrain.train.number'
-        with open(file_name, 'r') as f:
-            for line in f.readlines():
-                line = line.strip()
-                answer_map[line + postfix_1] = line + postfix_2
-        return answer_map
+    def get_network_anchors(self):
+        answer_map_x, answer_map_y = dict(), dict()
+        g1, g2 = self.data['g1'], self.data['g2']
+        for anchor_link in self.data['anchor_links']:
+            answer_map_x[f'{anchor_link[0]}_{g1}'] = f'{anchor_link[1]}_{g2}'
+            answer_map_y[f'{anchor_link[1]}_{g2}'] = f'{anchor_link[0]}_{g1}'
+        return answer_map_x, answer_map_y
 
-    def train(self, total_iter, file_interop, dim):
-        networkx_file = f"AcrossNetworkEmbeddingData/foursquare/following{file_interop}"
-        networky_file = f"AcrossNetworkEmbeddingData/twitter/following{file_interop}"
-        output_filename_networkx = f"AcrossNetworkEmbeddingData/foursquare/embeddings/foursquare.embedding.update.2SameAnchor.{self.foldtrain}.foldtrain.twodirectionContext{file_interop}"
-        output_filename_networky = f"AcrossNetworkEmbeddingData/twitter/embeddings/twitter.embedding.update.2SameAnchor.{self.foldtrain}.foldtrain.twodirectionContext{file_interop}"
-
-        two_order_x = IONEUpdate(dim, networkx_file, "foursquare")
+    def train(self, total_iter, dim):
+        two_order_x = IONEUpdate(self.data['g1'], self.data['edges1'], dim)
         two_order_x.init()
 
-        two_order_y = IONEUpdate(dim, networky_file, "twitter")
+        two_order_y = IONEUpdate(self.data['g2'], self.data['edges2'], dim)
         two_order_y.init()
 
-        anchor_x = self.get_network_anchors("_foursquare", "_twitter")
-        anchor_y = self.get_network_anchors("_twitter", "_foursquare")
+        anchor_x, anchor_y = self.get_network_anchors()
 
         print(f'number of anchors: {len(anchor_x)}')
         print(f'number of anchors: {len(anchor_y)}')
 
         for i in range(total_iter):
-            # if i % 10000 == 9999:
-            #     print(f"Iteration {i + 1}")
             two_order_x.train(i=i,
                               iter_count=total_iter,
                               two_order_answer=two_order_x.answer,
@@ -53,17 +46,21 @@ class IONE:
                               two_order_answer_context_output=two_order_x.answer_context_output,
                               anchors=anchor_y)
 
-        two_order_x.output(f"{output_filename_networkx}.{dim}_dim.{total_iter}")
-        two_order_y.output(f"{output_filename_networky}.{dim}_dim.{total_iter}")
+        # two_order_x.output(f"{output_filename_networkx}.{dim}_dim.{total_iter}")
+        # two_order_y.output(f"{output_filename_networky}.{dim}_dim.{total_iter}")
         n1 = len(two_order_x.answer)
         n2 = len(two_order_y.answer)
-        embs_x = np.vstack([two_order_x.answer[f"{uid}_foursquare"] for uid in range(n1)])
-        embs_y = np.vstack([two_order_y.answer[f"{uid}_twitter"] for uid in range(n2)])
+        embs_x = np.vstack([two_order_x.answer[f"{uid}_{self.data['g1']}"] for uid in range(n1)])
+        embs_y = np.vstack([two_order_y.answer[f"{uid}_{self.data['g2']}"] for uid in range(n2)])
         return embs_x, embs_y
 
 
 class IONEUpdate:
-    def __init__(self, dimension: int, filename: str, postfix: str):
+    def __init__(self, g, edges, out_dim):
+        self.g = g
+        self.edges = edges
+        self.dimension = out_dim
+
         self.vertex = {}
 
         self.answer = {}
@@ -75,56 +72,38 @@ class IONEUpdate:
         self.edge_weight = []
         self.alias = []
         self.prob = []
-
-        self.dimension = dimension
-
         self.neg_table = []
-        self.sigmoid_table_size = 1000
-        self.sigmoid_table = np.zeros(self.sigmoid_table_size).astype(np.float32)
-        self.SIGMOID_BOUND = 6
 
         self.init_rho = 0.025
         self.rho = 0
         self.num_negative = 5
         self.neg_table_size = 10000000
 
-        self.input_file = filename
-        self.postfix = postfix
-        self.rnd = random.Random(123)
-
     def read_data(self):
-        with open(self.input_file, 'r') as file:
-            count = 0
-            for line in file:
-                array = line.strip().split()
-                source = array[0] + "_" + self.postfix
-                target = array[1] + "_" + self.postfix
-                self.source_id.append(source)
-                self.target_id.append(target)
+        for edge in self.edges:
+            source = f'{edge[0]}_{self.g}'
+            target = f'{edge[1]}_{self.g}'
+            self.source_id.append(source)
+            self.target_id.append(target)
 
-                weight = float(1)
-                self.edge_weight.append(weight)
+            weight = float(1)
+            self.edge_weight.append(weight)
 
-                if source in self.vertex:
-                    self.vertex[source] += weight
-                else:
-                    self.vertex[source] = weight
-                    self.answer[source] = np.random.uniform(-0.5 / self.dimension, 0.5 / self.dimension, self.dimension).astype(np.float32)
-                    self.answer_context_input[source] = np.zeros(self.dimension).astype(np.float32)
-                    self.answer_context_output[source] = np.zeros(self.dimension).astype(np.float32)
+            if source in self.vertex:
+                self.vertex[source] += weight
+            else:
+                self.vertex[source] = weight
+                self.answer[source] = np.random.uniform(-0.5 / self.dimension, 0.5 / self.dimension, self.dimension).astype(np.float32)
+                self.answer_context_input[source] = np.zeros(self.dimension).astype(np.float32)
+                self.answer_context_output[source] = np.zeros(self.dimension).astype(np.float32)
 
-                if target in self.vertex:
-                    self.vertex[target] += weight
-                else:
-                    self.vertex[target] = weight
-                    self.answer[target] = np.random.uniform(-0.5 / self.dimension, 0.5 / self.dimension, self.dimension).astype(np.float32)
-                    self.answer_context_input[target] = np.zeros(self.dimension).astype(np.float32)
-                    self.answer_context_output[target] = np.zeros(self.dimension).astype(np.float32)
-
-                if count % 10000 == 0:
-                    print(f"Reading Edges {count}")
-                count += 1
-            print(f"Number of vertices: {len(self.vertex)}, Number of Edges: {count}")
+            if target in self.vertex:
+                self.vertex[target] += weight
+            else:
+                self.vertex[target] = weight
+                self.answer[target] = np.random.uniform(-0.5 / self.dimension, 0.5 / self.dimension, self.dimension).astype(np.float32)
+                self.answer_context_input[target] = np.zeros(self.dimension).astype(np.float32)
+                self.answer_context_output[target] = np.zeros(self.dimension).astype(np.float32)
 
     def init_alias_table(self):
         large_block = []
@@ -194,18 +173,9 @@ class IONEUpdate:
                     current_key = next(iter_keys)
             self.neg_table.append(current_key)
 
-    def init_sigmoid_table(self):
-        for i in range(self.sigmoid_table_size):
-            x = 2 * self.SIGMOID_BOUND * i / self.sigmoid_table_size - self.SIGMOID_BOUND
-            self.sigmoid_table[i] = 1 / (1 + np.exp(-x))
-
-    def fast_sigmoid(self, x: float):
-        if x > self.SIGMOID_BOUND:
-            return 1
-        elif x < -self.SIGMOID_BOUND:
-            return 0
-        k = int((x + self.SIGMOID_BOUND) * self.sigmoid_table_size / self.SIGMOID_BOUND / 2)
-        return self.sigmoid_table[k]
+    @staticmethod
+    def sigmoid(x):
+        return 1 / (1 + np.exp(-x))
 
     def update(self, vec_u, vec_v, vec_error, label, source, target, two_order_answer, two_order_answer_context,
                anchors):
@@ -215,7 +185,7 @@ class IONEUpdate:
             vec_v = two_order_answer_context[anchors[target]] if anchors[target] in two_order_answer_context else two_order_answer_context[target]
 
         x = vec_u @ vec_v
-        g = (label - self.fast_sigmoid(x)) * self.rho
+        g = (label - self.sigmoid(x)) * self.rho
 
         vec_error += g * vec_v
         if target in anchors:
@@ -235,7 +205,7 @@ class IONEUpdate:
             vec_v = two_order_answer_context[anchors[target]] if anchors[target] in two_order_answer_context else two_order_answer_context[target]
 
         x = vec_u @ vec_v
-        g = (label - self.fast_sigmoid(x)) * self.rho
+        g = (label - self.sigmoid(x)) * self.rho
 
         vec_error += g * vec_v
         if target in anchors:
@@ -260,7 +230,7 @@ class IONEUpdate:
               anchors):
         vec_error = np.zeros(self.dimension).astype(np.float32)
         vec_error_reverse = np.zeros(self.dimension).astype(np.float32)
-        if i % 1000000 == 0:
+        if i % int(iter_count/10) == 0:
             self.rho = self.init_rho * (1.0 - i / iter_count)
             if self.rho < self.init_rho * 0.0001:
                 self.rho = self.init_rho * 0.0001
@@ -270,7 +240,6 @@ class IONEUpdate:
         uid_1 = self.source_id[edge_id]
         uid_2 = self.target_id[edge_id]
 
-        label = 0
         d = 0
         while d < self.num_negative + 1:
             if d == 0:
@@ -279,11 +248,6 @@ class IONEUpdate:
             else:
                 neg_index = random.randint(0, self.neg_table_size - 1)
                 target = self.neg_table[neg_index]
-                # if uid_1 is None or uid_2 is None or target is None:
-                #     print(uid_1)
-                #     print(uid_2)
-                #     print(neg_index)
-                #     print(target)
                 if target == uid_1 or target == uid_2:
                     continue
                 label = 0
@@ -328,33 +292,60 @@ class IONEUpdate:
         self.read_data()
         self.init_alias_table()
         self.init_neg_table()
-        self.init_sigmoid_table()
-
-
-def load_test_data(foldtrain=9):
-    test_file = f"AcrossNetworkEmbeddingData/twitter_foursquare_groundtruth/groundtruth.{foldtrain}.foldtrain.test.number"
-    test_pairs = []
-    with open(test_file, 'r') as f:
-        for line in f.readlines():
-            line = line.strip()
-            test_pairs.append([int(line), int(line)])
-    return np.array(test_pairs)
 
 
 if __name__ == "__main__":
-    trainfold = 2
+    args = make_args()
 
-    test_pairs = load_test_data(trainfold)
-    test = IONE(trainfold)
-    total_iter = int(1e7)
-    embs_x, embs_y = test.train(total_iter, ".number", 100)
+    g1, g2 = args.dataset.split("-")
+    edge_index1, edge_index2, anchor_links, test_pairs = load_dataset(f'datasets/{args.dataset}', p=0.2)
+    data = {
+        'g1': g1,
+        'g2': g2,
+        'edges1': edge_index1,
+        'edges2': edge_index2,
+        'anchor_links': anchor_links,
+        'test_pairs': test_pairs
+    }
+
+    test = IONE(data)
+    embs_x, embs_y = test.train(args.total_iter, args.out_dim)
 
     emb_x = embs_x / (np.linalg.norm(embs_x, axis=1, keepdims=True) + 1e-10)
     emb_y = embs_y / (np.linalg.norm(embs_y, axis=1, keepdims=True) + 1e-10)
 
     similarity = np.dot(emb_x, emb_y.T)
-    hits_ks = hits_ks_scores(torch.from_numpy(similarity), torch.from_numpy(test_pairs), ks=[1, 5, 10, 30])
-    mrr = mrr_score(torch.from_numpy(similarity), torch.from_numpy(test_pairs))
+
+    hits_ks_ltr = hits_ks_ltr_scores(torch.from_numpy(similarity), torch.from_numpy(test_pairs), ks=[1, 5, 10, 30])
+    mrr_ltr = mrr_ltr_score(torch.from_numpy(similarity), torch.from_numpy(test_pairs))
+    print("-------LTR-------")
+    for k, hits_k in hits_ks_ltr.items():
+        print(f"Hits@{k}: {hits_k:.4f}")
+    print(f"MRR: {mrr_ltr:.4f}")
+    print('-----------------')
+
+    hits_ks_rtl = hits_ks_rtl_scores(torch.from_numpy(similarity), torch.from_numpy(test_pairs), ks=[1, 5, 10, 30])
+    mrr_rtl = mrr_rtl_score(torch.from_numpy(similarity), torch.from_numpy(test_pairs))
+    print("-------RTL-------")
+    for k, hits_k in hits_ks_rtl.items():
+        print(f"Hits@{k}: {hits_k:.4f}")
+    print(f"MRR: {mrr_rtl:.4f}")
+    print('-----------------')
+
+    print("-------MAX-------")
+    hits_ks = hits_ks_max_scores(torch.from_numpy(similarity), torch.from_numpy(test_pairs), ks=[1, 5, 10, 30])
+    mrr = mrr_max_score(torch.from_numpy(similarity), torch.from_numpy(test_pairs))
     for k, hits_k in hits_ks.items():
         print(f"Hits@{k}: {hits_k:.4f}")
     print(f"MRR: {mrr:.4f}")
+    print('-----------------')
+
+    print("-------MEAN-------")
+    hits_ks = hits_ks_mean_scores(torch.from_numpy(similarity), torch.from_numpy(test_pairs), ks=[1, 5, 10, 30])
+    mrr = mrr_mean_score(torch.from_numpy(similarity), torch.from_numpy(test_pairs))
+    for k, hits_k in hits_ks.items():
+        print(f"Hits@{k}: {hits_k:.4f}")
+    print(f"MRR: {mrr:.4f}")
+    print('-----------------')
+
+
