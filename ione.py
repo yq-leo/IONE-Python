@@ -1,7 +1,5 @@
-import numpy as np
 import random
-
-import torch
+import torch.nn.functional as F
 
 from utils.data import load_dataset
 from utils.metrics import *
@@ -46,12 +44,10 @@ class IONE:
                               two_order_answer_context_output=two_order_x.answer_context_output,
                               anchors=anchor_y)
 
-        # two_order_x.output(f"{output_filename_networkx}.{dim}_dim.{total_iter}")
-        # two_order_y.output(f"{output_filename_networky}.{dim}_dim.{total_iter}")
         n1 = len(two_order_x.answer)
         n2 = len(two_order_y.answer)
-        embs_x = np.vstack([two_order_x.answer[f"{uid}_{self.data['g1']}"] for uid in range(n1)])
-        embs_y = np.vstack([two_order_y.answer[f"{uid}_{self.data['g2']}"] for uid in range(n2)])
+        embs_x = torch.vstack([two_order_x.answer[f"{uid}_{self.data['g1']}"] for uid in range(n1)])
+        embs_y = torch.vstack([two_order_y.answer[f"{uid}_{self.data['g2']}"] for uid in range(n2)])
         return embs_x, embs_y
 
 
@@ -93,17 +89,17 @@ class IONEUpdate:
                 self.vertex[source] += weight
             else:
                 self.vertex[source] = weight
-                self.answer[source] = np.random.uniform(-0.5 / self.dimension, 0.5 / self.dimension, self.dimension).astype(np.float32)
-                self.answer_context_input[source] = np.zeros(self.dimension).astype(np.float32)
-                self.answer_context_output[source] = np.zeros(self.dimension).astype(np.float32)
+                self.answer[source] = torch.rand(self.dimension, dtype=torch.float32) * (1.0 / self.dimension) - (0.5 / self.dimension)
+                self.answer_context_input[source] = torch.zeros(self.dimension, dtype=torch.float32)
+                self.answer_context_output[source] = torch.zeros(self.dimension, dtype=torch.float32)
 
             if target in self.vertex:
                 self.vertex[target] += weight
             else:
                 self.vertex[target] = weight
-                self.answer[target] = np.random.uniform(-0.5 / self.dimension, 0.5 / self.dimension, self.dimension).astype(np.float32)
-                self.answer_context_input[target] = np.zeros(self.dimension).astype(np.float32)
-                self.answer_context_output[target] = np.zeros(self.dimension).astype(np.float32)
+                self.answer[target] = torch.rand(self.dimension, dtype=torch.float32) * (1.0 / self.dimension) - (0.5 / self.dimension)
+                self.answer_context_input[target] = torch.zeros(self.dimension, dtype=torch.float32)
+                self.answer_context_output[target] = torch.zeros(self.dimension, dtype=torch.float32)
 
     def init_alias_table(self):
         large_block = []
@@ -173,10 +169,6 @@ class IONEUpdate:
                     current_key = next(iter_keys)
             self.neg_table.append(current_key)
 
-    @staticmethod
-    def sigmoid(x):
-        return 1 / (1 + np.exp(-x))
-
     def update(self, vec_u, vec_v, vec_error, label, source, target, two_order_answer, two_order_answer_context,
                anchors):
         if source in anchors:
@@ -185,7 +177,7 @@ class IONEUpdate:
             vec_v = two_order_answer_context[anchors[target]] if anchors[target] in two_order_answer_context else two_order_answer_context[target]
 
         x = vec_u @ vec_v
-        g = (label - self.sigmoid(x)) * self.rho
+        g = (label - torch.sigmoid(x)) * self.rho
 
         vec_error += g * vec_v
         if target in anchors:
@@ -198,14 +190,14 @@ class IONEUpdate:
 
     def update_reverse(self, vec_u, vec_v, vec_error, label, source, target, two_order_answer, two_order_answer_context,
                        anchors):
-        vec_error = np.zeros(self.dimension).astype(np.float32)
+        vec_error = torch.zeros(self.dimension, dtype=torch.float32)
         if source in anchors:
             vec_u = two_order_answer[anchors[source]] if anchors[source] in two_order_answer else two_order_answer[source]
         if target in anchors:
             vec_v = two_order_answer_context[anchors[target]] if anchors[target] in two_order_answer_context else two_order_answer_context[target]
 
         x = vec_u @ vec_v
-        g = (label - self.sigmoid(x)) * self.rho
+        g = (label - torch.sigmoid(x)) * self.rho
 
         vec_error += g * vec_v
         if target in anchors:
@@ -228,8 +220,8 @@ class IONEUpdate:
 
     def train(self, i, iter_count, two_order_answer, two_order_answer_context_input, two_order_answer_context_output,
               anchors):
-        vec_error = np.zeros(self.dimension).astype(np.float32)
-        vec_error_reverse = np.zeros(self.dimension).astype(np.float32)
+        vec_error = torch.zeros(self.dimension, dtype=torch.float32)
+        vec_error_reverse = torch.zeros(self.dimension, dtype=torch.float32)
         if i % int(iter_count/10) == 0:
             self.rho = self.init_rho * (1.0 - i / iter_count)
             if self.rho < self.init_rho * 0.0001:
@@ -311,21 +303,21 @@ if __name__ == "__main__":
     test = IONE(data)
     embs_x, embs_y = test.train(args.total_iter, args.out_dim)
 
-    emb_x = embs_x / (np.linalg.norm(embs_x, axis=1, keepdims=True) + 1e-10)
-    emb_y = embs_y / (np.linalg.norm(embs_y, axis=1, keepdims=True) + 1e-10)
+    emb_x = F.normalize(embs_x, p=2, dim=1)
+    emb_y = F.normalize(embs_y, p=2, dim=1)
 
-    similarity = np.dot(emb_x, emb_y.T)
+    similarity = emb_x @ emb_y.T
 
-    hits_ks_ltr = hits_ks_ltr_scores(torch.from_numpy(similarity), torch.from_numpy(test_pairs), ks=[1, 5, 10, 30])
-    mrr_ltr = mrr_ltr_score(torch.from_numpy(similarity), torch.from_numpy(test_pairs))
+    hits_ks_ltr = hits_ks_ltr_scores(similarity, torch.from_numpy(test_pairs), ks=[1, 5, 10, 30])
+    mrr_ltr = mrr_ltr_score(similarity, torch.from_numpy(test_pairs))
     print("-------LTR-------")
     for k, hits_k in hits_ks_ltr.items():
         print(f"Hits@{k}: {hits_k:.4f}")
     print(f"MRR: {mrr_ltr:.4f}")
     print('-----------------')
 
-    hits_ks_rtl = hits_ks_rtl_scores(torch.from_numpy(similarity), torch.from_numpy(test_pairs), ks=[1, 5, 10, 30])
-    mrr_rtl = mrr_rtl_score(torch.from_numpy(similarity), torch.from_numpy(test_pairs))
+    hits_ks_rtl = hits_ks_rtl_scores(similarity, torch.from_numpy(test_pairs), ks=[1, 5, 10, 30])
+    mrr_rtl = mrr_rtl_score(similarity, torch.from_numpy(test_pairs))
     print("-------RTL-------")
     for k, hits_k in hits_ks_rtl.items():
         print(f"Hits@{k}: {hits_k:.4f}")
@@ -333,16 +325,16 @@ if __name__ == "__main__":
     print('-----------------')
 
     print("-------MAX-------")
-    hits_ks = hits_ks_max_scores(torch.from_numpy(similarity), torch.from_numpy(test_pairs), ks=[1, 5, 10, 30])
-    mrr = mrr_max_score(torch.from_numpy(similarity), torch.from_numpy(test_pairs))
+    hits_ks = hits_ks_max_scores(similarity, torch.from_numpy(test_pairs), ks=[1, 5, 10, 30])
+    mrr = mrr_max_score(similarity, torch.from_numpy(test_pairs))
     for k, hits_k in hits_ks.items():
         print(f"Hits@{k}: {hits_k:.4f}")
     print(f"MRR: {mrr:.4f}")
     print('-----------------')
 
     print("-------MEAN-------")
-    hits_ks = hits_ks_mean_scores(torch.from_numpy(similarity), torch.from_numpy(test_pairs), ks=[1, 5, 10, 30])
-    mrr = mrr_mean_score(torch.from_numpy(similarity), torch.from_numpy(test_pairs))
+    hits_ks = hits_ks_mean_scores(similarity, torch.from_numpy(test_pairs), ks=[1, 5, 10, 30])
+    mrr = mrr_mean_score(similarity, torch.from_numpy(test_pairs))
     for k, hits_k in hits_ks.items():
         print(f"Hits@{k}: {hits_k:.4f}")
     print(f"MRR: {mrr:.4f}")
