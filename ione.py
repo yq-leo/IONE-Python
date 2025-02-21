@@ -204,7 +204,7 @@ class IONEUpdate:
             return 1
         elif x < -self.SIGMOID_BOUND:
             return 0
-        k = int((x + self.SIGMOID_BOUND) * self.sigmoid_table_size / self.SIGMOID_BOUND / 2)
+        k = int((x + self.SIGMOID_BOUND) * self.sigmoid_table_size / self.SIGMOID_BOUND) // 2
         return self.sigmoid_table[k]
 
     def update(self, vec_u, vec_v, vec_error, label, source, target, two_order_answer, two_order_answer_context,
@@ -342,7 +342,7 @@ def load_test_data(foldtrain=9):
 
 
 if __name__ == "__main__":
-    trainfold = 2
+    trainfold = 9
 
     test_pairs = load_test_data(trainfold)
     test = IONE(trainfold)
