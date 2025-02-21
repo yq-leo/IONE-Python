@@ -2,3 +2,4 @@
 .idea/
 AcrossNetworkEmbeddingData/
 embeddings/
+**.ipynb
